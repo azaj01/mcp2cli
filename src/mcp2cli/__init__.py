@@ -15,9 +15,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import os
+
 import httpx
 
-CACHE_DIR = Path.home() / ".cache" / "mcp2cli"
+CACHE_DIR = Path(os.environ.get("MCP2CLI_CACHE_DIR", Path.home() / ".cache" / "mcp2cli"))
 DEFAULT_CACHE_TTL = 3600
 
 
@@ -589,8 +591,6 @@ def run_mcp_stdio(
     import anyio
 
     async def _run():
-        import os
-
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
@@ -744,8 +744,6 @@ def _fetch_mcp_tools(
         nonlocal tools_result
 
         if is_stdio:
-            import os
-
             from mcp import ClientSession
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
