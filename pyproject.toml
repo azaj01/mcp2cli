@@ -13,6 +13,9 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
 [project.scripts]
 mcp2cli = "mcp2cli:main"
 
