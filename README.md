@@ -44,21 +44,41 @@ We measured this. Not estimates — actual token counts using the cl100k_base to
 
 ### Per-turn cost
 
-Every API turn, the native approach injects all tool schemas. mcp2cli injects a single 67-token instruction.
+Every turn, the native approach injects all tool schemas into the system prompt. mcp2cli injects a single 67-token instruction.
+
+**MCP servers** — native cost scales at ~121 tokens per tool:
 
 | Scenario | Native (tokens/turn) | mcp2cli (tokens/turn) | Reduction |
 |---|--:|--:|--:|
 | Small MCP server (3 tools) | 203 | 67 | **67%** |
+| Task manager (30 tools) | 3,619 | 67 | **98%** |
+| Multi-server setup (60 tools) | 7,238 | 67 | **>99%** |
+| Full platform (120 tools) | 14,476 | 67 | **>99%** |
+
+**OpenAPI specs** — native cost scales at ~72 tokens per endpoint:
+
+| Scenario | Native (tokens/turn) | mcp2cli (tokens/turn) | Reduction |
+|---|--:|--:|--:|
 | Petstore API (5 endpoints) | 358 | 67 | **81%** |
 | Medium API (20 endpoints) | 1,430 | 67 | **95%** |
 | Large API (50 endpoints) | 3,579 | 67 | **98%** |
 | Enterprise API (200 endpoints) | 14,316 | 67 | **>99%** |
 
-Native cost scales at ~72 tokens per endpoint. mcp2cli's cost is fixed.
+MCP tools are heavier than OpenAPI endpoints because they carry full `inputSchema` with inline descriptions and enums. Either way, mcp2cli's cost is fixed.
 
 ### Over a full conversation
 
 The savings compound. Here's the total token cost across a realistic multi-turn conversation, including the one-time discovery cost (`--list`) and tool call outputs:
+
+**MCP servers:**
+
+| Scenario | Turns | Tool calls | Native total | mcp2cli total | Saved |
+|---|--:|--:|--:|--:|--:|
+| Task manager (30 tools) | 15 | 8 | 54,525 | 1,709 | **97%** |
+| Multi-server (80 tools) | 20 | 12 | 193,360 | 2,100 | **99%** |
+| Full platform (120 tools) | 25 | 15 | 362,350 | 2,725 | **99%** |
+
+**OpenAPI specs:**
 
 | Scenario | Turns | Tool calls | Native total | mcp2cli total | Saved |
 |---|--:|--:|--:|--:|--:|
@@ -67,48 +87,52 @@ The savings compound. Here's the total token cost across a realistic multi-turn 
 | Large API (50 endpoints) | 20 | 12 | 71,940 | 1,850 | **97%** |
 | Enterprise API (200 endpoints) | 25 | 15 | 358,425 | 2,725 | **99%** |
 
-A 200-endpoint enterprise API over 25 turns: **355,700 tokens saved**.
+A 120-tool MCP platform over 25 turns: **359,625 tokens saved**. The story is the same for a 200-endpoint API: **355,700 tokens saved**.
 
 ### Turn-by-turn: watching the gap widen
 
-Here's a 50-endpoint API over 10 turns. The native approach bleeds tokens on every turn; mcp2cli's cost barely moves.
+Here's a 30-tool MCP server over 10 turns. The native approach bleeds tokens on every turn; mcp2cli's cost barely moves.
 
 ```
 Turn   Native       mcp2cli      Savings
 ──────────────────────────────────────────
-1      3,579        217          3,362       ← mcp2cli: discovery (--list)
-2      7,158        284          6,874
-3      10,767       381          10,386      ← tool call
-4      14,346       448          13,898
-5      17,955       545          17,410      ← tool call
-6      21,534       612          20,922
-7      25,143       709          24,434      ← tool call
-8      28,722       776          27,946
-9      32,331       873          31,458      ← tool call
-10     35,910       940          34,970
+1      3,619        217          3,402       ← mcp2cli: discovery (--list)
+2      7,238        284          6,954
+3      10,887       381          10,506      ← tool call
+4      14,506       448          14,058
+5      18,155       545          17,610      ← tool call
+6      21,774       612          21,162
+7      25,423       709          24,714      ← tool call
+8      29,042       776          28,266
+9      32,691       873          31,818      ← tool call
+10     36,310       940          35,370
 
-Total: 34,970 tokens saved (97.4%)
+Total: 35,370 tokens saved (97.4%)
 ```
 
 ### Why the gap is so large
 
-**Native approach** — pay the full schema tax on every turn:
+**Native MCP approach** — pay the full schema tax on every turn:
 ```
-System prompt: "You have these 50 tools: [3,579 tokens of JSON schemas]"
-  → 3,579 tokens consumed per turn, whether used or not
-  → 10 turns = 35,910 tokens
+System prompt: "You have these 30 tools: [3,619 tokens of JSON schemas]"
+  → 3,619 tokens consumed per turn, whether used or not
+  → 10 turns = 36,310 tokens
 ```
 
 **mcp2cli approach** — pay only for what you use:
 ```
-System prompt: "Use mcp2cli --spec <url> <command> [--flags]"   (67 tokens/turn)
-  → mcp2cli --spec <url> --list                                (65 tokens, once)
-  → mcp2cli --spec <url> create-pet --help                     (78 tokens, once)
-  → mcp2cli --spec <url> create-pet --name Rex                 (0 extra tokens)
+System prompt: "Use mcp2cli --mcp <url> <command> [--flags]"   (67 tokens/turn)
+  → mcp2cli --mcp <url> --list                                (~150 tokens, once)
+  → mcp2cli --mcp <url> create-task --help                     (~80 tokens, once)
+  → mcp2cli --mcp <url> create-task --title "Fix bug"          (0 extra tokens)
   → 10 turns = 940 tokens
 ```
 
 The LLM discovers what it needs, when it needs it. Everything else stays out of context.
+
+### The multi-server problem
+
+This is where it really hurts. Connect 3 MCP servers (a task manager, a filesystem server, and a database server — 60 tools total) and you're paying 7,238 tokens per turn. Over a 20-turn conversation, that's **145,060 tokens** just for tool schemas. mcp2cli reduces that to **1,940 tokens** — a **98.7% reduction**.
 
 ## Install
 
@@ -252,4 +276,4 @@ This project was inspired by [Kagan Yilmaz's analysis of CLI vs MCP token costs]
 
 ## License
 
-MIT
+[MIT](LICENSE)

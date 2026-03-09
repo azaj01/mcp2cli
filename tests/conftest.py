@@ -341,3 +341,414 @@ def _clean_cache(tmp_path, monkeypatch):
     import mcp2cli
 
     monkeypatch.setattr(mcp2cli, "CACHE_DIR", tmp_path / "cache")
+
+
+# ---------------------------------------------------------------------------
+# Realistic MCP tool definitions — modeled after a real task management
+# server (Fulcrum, ~120 tools). These represent the JSON schemas that get
+# injected into the system prompt when using native MCP tool injection.
+# ---------------------------------------------------------------------------
+
+REALISTIC_MCP_TOOLS = [
+    {
+        "name": "list_tasks",
+        "description": "List all tasks with flexible filtering. Supports text search across title and description, status filtering, project filtering, and tag filtering.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string", "description": "Search text to filter tasks by title or description"},
+                "status": {"type": "string", "enum": ["TO_DO", "IN_PROGRESS", "IN_REVIEW", "DONE", "CANCELED"], "description": "Filter by task status"},
+                "project_id": {"type": "integer", "description": "Filter by project ID"},
+                "tag": {"type": "string", "description": "Filter by tag name"},
+                "limit": {"type": "integer", "description": "Maximum number of tasks to return"},
+                "offset": {"type": "integer", "description": "Number of tasks to skip for pagination"},
+                "sort_by": {"type": "string", "enum": ["created", "updated", "title", "status", "due_date"], "description": "Field to sort results by"},
+                "sort_order": {"type": "string", "enum": ["asc", "desc"], "description": "Sort direction"},
+            },
+        },
+    },
+    {
+        "name": "create_task",
+        "description": "Create a new task. For worktree tasks, provide repoPath to create a git worktree. Supports setting priority, due dates, tags, and recurrence rules.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["title"],
+            "properties": {
+                "title": {"type": "string", "description": "Task title"},
+                "type": {"type": "string", "enum": ["worktree", "scratch"], "description": "Task type"},
+                "repo_path": {"type": "string", "description": "Path to git repository for worktree tasks"},
+                "base_branch": {"type": "string", "description": "Base branch for worktree"},
+                "branch": {"type": "string", "description": "Branch name override"},
+                "prefix": {"type": "string", "description": "Branch name prefix"},
+                "description": {"type": "string", "description": "Task description in markdown"},
+                "status": {"type": "string", "enum": ["TO_DO", "IN_PROGRESS", "IN_REVIEW", "DONE", "CANCELED"], "description": "Initial task status"},
+                "project_id": {"type": "integer", "description": "Project to assign task to"},
+                "repository_id": {"type": "integer", "description": "Repository to link task to"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to apply to the task"},
+                "due_date": {"type": "string", "description": "Due date in ISO 8601 format"},
+                "time_estimate": {"type": "string", "description": "Time estimate (e.g. '2h', '30m')"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "Task priority level"},
+                "recurrence_rule": {"type": "string", "enum": ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"], "description": "Recurrence schedule"},
+                "recurrence_end_date": {"type": "string", "description": "End date for recurrence"},
+            },
+        },
+    },
+    {
+        "name": "update_task",
+        "description": "Update task metadata including title, description, and recurrence settings.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "title": {"type": "string", "description": "New task title"},
+                "description": {"type": "string", "description": "New task description"},
+                "recurrence_rule": {"type": "string", "enum": ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"], "description": "Recurrence schedule"},
+                "recurrence_end_date": {"type": "string", "description": "End date for recurrence"},
+            },
+        },
+    },
+    {
+        "name": "get_task",
+        "description": "Get details of a specific task by ID, including dependencies and attachments.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+            },
+        },
+    },
+    {
+        "name": "delete_task",
+        "description": "Delete a task and optionally its linked git worktree.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "delete_worktree": {"type": "boolean", "description": "Also delete the git worktree if one exists"},
+            },
+        },
+    },
+    {
+        "name": "move_task",
+        "description": "Move a task to a different status column.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id", "status"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "status": {"type": "string", "enum": ["TO_DO", "IN_PROGRESS", "IN_REVIEW", "DONE", "CANCELED"], "description": "New status"},
+            },
+        },
+    },
+    {
+        "name": "add_task_tag",
+        "description": "Add a tag to a task for categorization. Returns similar existing tags if available.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id", "tag"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "tag": {"type": "string", "description": "Tag name to add"},
+            },
+        },
+    },
+    {
+        "name": "remove_task_tag",
+        "description": "Remove a tag from a task.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id", "tag"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "tag": {"type": "string", "description": "Tag name to remove"},
+            },
+        },
+    },
+    {
+        "name": "set_task_due_date",
+        "description": "Set or clear the due date for a task.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "due_date": {"type": "string", "description": "Due date in ISO 8601 format, or null to clear"},
+            },
+        },
+    },
+    {
+        "name": "add_task_link",
+        "description": "Add a URL link to a task for documentation, related PRs, or design files.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id", "url"],
+            "properties": {
+                "id": {"type": "integer", "description": "Task ID"},
+                "url": {"type": "string", "description": "URL to link"},
+                "title": {"type": "string", "description": "Display title for the link"},
+            },
+        },
+    },
+    {
+        "name": "add_task_dependency",
+        "description": "Add a dependency between tasks. The task cannot start until the dependency is completed.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id", "depends_on_id"],
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task that depends on another"},
+                "depends_on_id": {"type": "integer", "description": "Task that must be completed first"},
+            },
+        },
+    },
+    {
+        "name": "get_task_dependency_graph",
+        "description": "Get all tasks and their dependencies as a graph structure for visualization.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "integer", "description": "Filter graph to a specific project"},
+            },
+        },
+    },
+    {
+        "name": "upload_task_attachment",
+        "description": "Upload a file to a task from a local path. Supported types: PDF, images, text, and code files.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id", "file_path"],
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID"},
+                "file_path": {"type": "string", "description": "Local file path to upload"},
+                "description": {"type": "string", "description": "Description of the attachment"},
+            },
+        },
+    },
+    {
+        "name": "list_projects",
+        "description": "List all projects with optional filtering by status and search.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string", "description": "Search text to filter projects"},
+                "status": {"type": "string", "enum": ["active", "archived"], "description": "Filter by project status"},
+            },
+        },
+    },
+    {
+        "name": "create_project",
+        "description": "Create a new project for organizing tasks and repositories.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Project name"},
+                "description": {"type": "string", "description": "Project description"},
+                "color": {"type": "string", "description": "Project color (hex code)"},
+                "repository_id": {"type": "integer", "description": "Link a repository to the project"},
+            },
+        },
+    },
+    {
+        "name": "update_project",
+        "description": "Update project metadata.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Project ID"},
+                "name": {"type": "string", "description": "New project name"},
+                "description": {"type": "string", "description": "New description"},
+                "color": {"type": "string", "description": "New color"},
+                "status": {"type": "string", "enum": ["active", "archived"], "description": "Project status"},
+            },
+        },
+    },
+    {
+        "name": "list_repositories",
+        "description": "List all configured repositories. Supports filtering for orphans not linked to any project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "orphans_only": {"type": "boolean", "description": "Only show repositories not linked to a project"},
+                "project_id": {"type": "integer", "description": "Filter by linked project"},
+            },
+        },
+    },
+    {
+        "name": "add_repository",
+        "description": "Add a repository from a local path. The path must be an existing git repository.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {"type": "string", "description": "Local path to git repository"},
+                "name": {"type": "string", "description": "Display name for the repository"},
+                "is_template": {"type": "boolean", "description": "Mark as a Copier template repository"},
+            },
+        },
+    },
+    {
+        "name": "execute_command",
+        "description": "Execute a CLI command on the remote server. Supports persistent sessions for stateful operations.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string", "description": "Command to execute"},
+                "session_id": {"type": "string", "description": "Session ID for persistent state"},
+                "working_directory": {"type": "string", "description": "Working directory for the command"},
+                "timeout": {"type": "integer", "description": "Command timeout in seconds"},
+                "env": {"type": "object", "description": "Additional environment variables"},
+            },
+        },
+    },
+    {
+        "name": "list_calendar_events",
+        "description": "List calendar events within a date range across all calendars.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "description": "Start of date range (ISO 8601)"},
+                "end_date": {"type": "string", "description": "End of date range (ISO 8601)"},
+                "calendar_id": {"type": "string", "description": "Filter to specific calendar"},
+                "search": {"type": "string", "description": "Search text to filter events"},
+            },
+        },
+    },
+    {
+        "name": "create_calendar_event",
+        "description": "Create a new calendar event.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["title", "start", "end"],
+            "properties": {
+                "title": {"type": "string", "description": "Event title"},
+                "start": {"type": "string", "description": "Start time (ISO 8601)"},
+                "end": {"type": "string", "description": "End time (ISO 8601)"},
+                "description": {"type": "string", "description": "Event description"},
+                "location": {"type": "string", "description": "Event location"},
+                "calendar_id": {"type": "string", "description": "Calendar to create event in"},
+                "all_day": {"type": "boolean", "description": "Whether this is an all-day event"},
+            },
+        },
+    },
+    {
+        "name": "deploy_app",
+        "description": "Deploy an application to the configured platform.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["app_id"],
+            "properties": {
+                "app_id": {"type": "string", "description": "Application ID"},
+                "branch": {"type": "string", "description": "Git branch to deploy"},
+                "force": {"type": "boolean", "description": "Force deployment even if checks fail"},
+                "env_overrides": {"type": "object", "description": "Environment variable overrides for this deployment"},
+            },
+        },
+    },
+    {
+        "name": "search",
+        "description": "Full-text search across tasks, projects, repositories, and notes.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "types": {"type": "array", "items": {"type": "string", "enum": ["task", "project", "repository", "note"]}, "description": "Entity types to search"},
+                "limit": {"type": "integer", "description": "Maximum results to return"},
+            },
+        },
+    },
+    {
+        "name": "memory_store",
+        "description": "Store a memory/note for later retrieval by the AI assistant.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["content"],
+            "properties": {
+                "content": {"type": "string", "description": "Memory content to store"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"},
+                "category": {"type": "string", "description": "Memory category"},
+            },
+        },
+    },
+    {
+        "name": "memory_search",
+        "description": "Search stored memories using semantic or keyword search.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "description": "Maximum results"},
+                "category": {"type": "string", "description": "Filter by category"},
+            },
+        },
+    },
+    {
+        "name": "send_notification",
+        "description": "Send a notification to all enabled notification channels.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["title", "message"],
+            "properties": {
+                "title": {"type": "string", "description": "Notification title"},
+                "message": {"type": "string", "description": "Notification body"},
+                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"], "description": "Notification priority"},
+            },
+        },
+    },
+    {
+        "name": "create_backup",
+        "description": "Create a backup of the database and configuration.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Backup name"},
+                "include_attachments": {"type": "boolean", "description": "Include file attachments in backup"},
+            },
+        },
+    },
+    {
+        "name": "list_jobs",
+        "description": "List all scheduled jobs and their status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "disabled", "all"], "description": "Filter by job status"},
+            },
+        },
+    },
+    {
+        "name": "create_job",
+        "description": "Create a new scheduled job with a cron expression.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["name", "command", "schedule"],
+            "properties": {
+                "name": {"type": "string", "description": "Job name"},
+                "command": {"type": "string", "description": "Command to execute"},
+                "schedule": {"type": "string", "description": "Cron expression (e.g. '0 * * * *')"},
+                "description": {"type": "string", "description": "Job description"},
+                "enabled": {"type": "boolean", "description": "Whether job is enabled"},
+                "timeout": {"type": "integer", "description": "Job timeout in seconds"},
+                "notify_on_failure": {"type": "boolean", "description": "Send notification on failure"},
+            },
+        },
+    },
+    {
+        "name": "search_tools",
+        "description": "Search for available MCP tools by keyword or category. Use this to discover tools you don't know about.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search keyword or category"},
+            },
+        },
+    },
+]

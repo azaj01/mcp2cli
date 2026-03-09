@@ -2,7 +2,7 @@
 
 Compares the native tool injection approach (all tool schemas in the system
 prompt on every turn) vs mcp2cli's on-demand CLI approach, across realistic
-multi-turn conversations.
+multi-turn conversations for both OpenAPI and MCP servers.
 """
 
 import json
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import tiktoken
 
-from conftest import PETSTORE_SPEC
+from conftest import PETSTORE_SPEC, REALISTIC_MCP_TOOLS
 
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -85,7 +85,7 @@ def _openapi_to_native_tools(spec: dict) -> list[dict]:
     return tools
 
 
-# The MCP test server's tool definitions
+# The MCP test server's tool definitions (3 simple tools)
 MCP_TOOLS = [
     {
         "name": "echo",
@@ -168,8 +168,8 @@ def _simulate_conversation(
     }
 
 
-class TestTokenSavings:
-    """Measure and verify token savings from mcp2cli vs native tool injection."""
+class TestOpenAPITokenSavings:
+    """Measure and verify token savings for OpenAPI specs."""
 
     def test_system_prompt_token_count(self):
         """The mcp2cli system prompt should be under 100 tokens."""
@@ -209,35 +209,6 @@ class TestTokenSavings:
         print(f"Tokens saved:           {result['tokens_saved']:,} ({result['reduction_pct']}%)")
 
         assert result["reduction_pct"] > 70, f"Expected >70% reduction, got {result['reduction_pct']}%"
-
-    def test_mcp_server_savings(self):
-        """Measure savings for our 3-tool MCP test server."""
-        native_tools = _build_native_tool_definitions(MCP_TOOLS)
-        native_text = json.dumps(native_tools)
-        native_tokens = _count_tokens(native_text)
-        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
-
-        list_output = "echo  add-numbers  list-items"
-        list_tokens = _count_tokens(list_output)
-
-        result = _simulate_conversation(
-            num_turns=10,
-            native_tool_tokens=native_tokens,
-            mcp2cli_prompt_tokens=prompt_tokens,
-            discovery_tokens=list_tokens,
-            num_tool_calls=5,
-            tool_call_output_tokens=20,
-        )
-
-        print(f"\n--- MCP server (3 tools) over {result['turns']} turns ---")
-        print(f"Native tool injection:  {native_tokens} tokens/turn")
-        print(f"mcp2cli system prompt:  {prompt_tokens} tokens/turn")
-        print(f"Discovery (--list):     {list_tokens} tokens (once)")
-        print(f"Native total:           {result['native_total']:,} tokens")
-        print(f"mcp2cli total:          {result['mcp2cli_total']:,} tokens")
-        print(f"Tokens saved:           {result['tokens_saved']:,} ({result['reduction_pct']}%)")
-
-        assert result["reduction_pct"] > 50, f"Expected >50% reduction, got {result['reduction_pct']}%"
 
     def test_scaled_api_savings(self):
         """Project savings for realistic API sizes: 20, 50, 200 endpoints.
@@ -410,3 +381,229 @@ class TestTokenSavings:
         print(f"  Per-endpoint cost: {per_endpoint:.0f} tokens")
         print(f"  5 endpoints native: {native_5} tokens")
         print(f"  Ratio: {native_5 / prompt_tokens:.1f}x")
+
+
+class TestMCPTokenSavings:
+    """Measure and verify token savings for MCP servers specifically.
+
+    Uses realistic tool definitions modeled after a real-world task
+    management MCP server (~30 tools with full schemas).
+    """
+
+    def test_small_mcp_server_savings(self):
+        """Measure savings for a 3-tool MCP test server."""
+        native_tools = _build_native_tool_definitions(MCP_TOOLS)
+        native_text = json.dumps(native_tools)
+        native_tokens = _count_tokens(native_text)
+        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
+
+        list_output = "echo  add-numbers  list-items"
+        list_tokens = _count_tokens(list_output)
+
+        result = _simulate_conversation(
+            num_turns=10,
+            native_tool_tokens=native_tokens,
+            mcp2cli_prompt_tokens=prompt_tokens,
+            discovery_tokens=list_tokens,
+            num_tool_calls=5,
+            tool_call_output_tokens=20,
+        )
+
+        print(f"\n--- Small MCP server (3 tools) over {result['turns']} turns ---")
+        print(f"Native tool injection:  {native_tokens} tokens/turn")
+        print(f"mcp2cli system prompt:  {prompt_tokens} tokens/turn")
+        print(f"Native total:           {result['native_total']:,} tokens")
+        print(f"mcp2cli total:          {result['mcp2cli_total']:,} tokens")
+        print(f"Tokens saved:           {result['tokens_saved']:,} ({result['reduction_pct']}%)")
+
+        assert result["reduction_pct"] > 50, f"Expected >50% reduction, got {result['reduction_pct']}%"
+
+    def test_realistic_mcp_server_savings(self):
+        """Measure savings for a realistic 30-tool MCP server.
+
+        Uses tool definitions modeled after a real task management server
+        with complex inputSchemas including enums, arrays, nested objects,
+        and detailed descriptions.
+        """
+        native_tools = _build_native_tool_definitions(REALISTIC_MCP_TOOLS)
+        native_text = json.dumps(native_tools)
+        native_tokens = _count_tokens(native_text)
+        per_tool = native_tokens / len(REALISTIC_MCP_TOOLS)
+        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
+
+        # Simulate --list output: tool names and short descriptions
+        list_lines = [f"  {t['name']:<30} {t.get('description', '')[:60]}" for t in REALISTIC_MCP_TOOLS]
+        list_output = "Available tools:\n" + "\n".join(list_lines)
+        list_tokens = _count_tokens(list_output)
+
+        result = _simulate_conversation(
+            num_turns=15,
+            native_tool_tokens=native_tokens,
+            mcp2cli_prompt_tokens=prompt_tokens,
+            discovery_tokens=list_tokens,
+            num_tool_calls=8,
+            tool_call_output_tokens=30,
+        )
+
+        print(f"\n--- Realistic MCP server ({len(REALISTIC_MCP_TOOLS)} tools) over {result['turns']} turns ---")
+        print(f"Per-tool token cost:    {per_tool:.0f} tokens")
+        print(f"Native tool injection:  {native_tokens:,} tokens/turn")
+        print(f"mcp2cli system prompt:  {prompt_tokens} tokens/turn")
+        print(f"Discovery (--list):     {list_tokens} tokens (once)")
+        print(f"Native total:           {result['native_total']:,} tokens")
+        print(f"mcp2cli total:          {result['mcp2cli_total']:,} tokens")
+        print(f"Tokens saved:           {result['tokens_saved']:,} ({result['reduction_pct']}%)")
+
+        assert result["reduction_pct"] > 90, f"Expected >90% reduction, got {result['reduction_pct']}%"
+
+    def test_per_tool_token_cost(self):
+        """Measure the per-tool token cost for MCP tool schemas.
+
+        Real MCP tools tend to be heavier than OpenAPI endpoints because
+        they include full inputSchema with descriptions and enums inline.
+        """
+        native_tools = _build_native_tool_definitions(REALISTIC_MCP_TOOLS)
+        native_tokens = _count_tokens(json.dumps(native_tools))
+        per_tool = native_tokens / len(REALISTIC_MCP_TOOLS)
+
+        # Compare with OpenAPI per-endpoint cost
+        openapi_tools = _openapi_to_native_tools(PETSTORE_SPEC)
+        openapi_per_endpoint = _count_tokens(json.dumps(openapi_tools)) / len(openapi_tools)
+
+        print(f"\n--- Per-tool/endpoint token cost ---")
+        print(f"MCP per-tool:      {per_tool:.0f} tokens (avg over {len(REALISTIC_MCP_TOOLS)} tools)")
+        print(f"OpenAPI per-endpoint: {openapi_per_endpoint:.0f} tokens (avg over {len(openapi_tools)} endpoints)")
+
+        # Show individual tool costs
+        print(f"\nIndividual MCP tool costs:")
+        for t in REALISTIC_MCP_TOOLS[:5]:
+            tool_def = {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema", {})}
+            tokens = _count_tokens(json.dumps(tool_def))
+            print(f"  {t['name']:<30} {tokens:>4} tokens")
+        print(f"  ...")
+
+        # MCP per-tool cost should be significant (real schemas aren't tiny)
+        assert per_tool > 40, f"Per-tool cost {per_tool:.0f} seems too low for realistic schemas"
+
+    def test_scaled_mcp_server_savings(self):
+        """Project savings for realistic MCP server sizes: 30, 80, 120 tools.
+
+        Uses per-tool token cost from our realistic fixture to extrapolate
+        to larger servers like Fulcrum (~120 tools) or multi-server setups.
+        """
+        native_tools = _build_native_tool_definitions(REALISTIC_MCP_TOOLS)
+        per_tool = _count_tokens(json.dumps(native_tools)) / len(REALISTIC_MCP_TOOLS)
+        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
+
+        scenarios = [
+            {"name": "Task manager", "tools": 30, "turns": 15, "calls": 8},
+            {"name": "Multi-server (3 servers)", "tools": 80, "turns": 20, "calls": 12},
+            {"name": "Full platform (Fulcrum-scale)", "tools": 120, "turns": 25, "calls": 15},
+        ]
+
+        print(f"\nMCP per-tool token cost: {per_tool:.0f} tokens")
+        print(f"mcp2cli prompt: {prompt_tokens} tokens/turn")
+        print()
+
+        for s in scenarios:
+            native_tokens = int(per_tool * s["tools"])
+            # --list output: ~5 tokens per tool (name + short desc)
+            list_tokens = s["tools"] * 5
+
+            result = _simulate_conversation(
+                num_turns=s["turns"],
+                native_tool_tokens=native_tokens,
+                mcp2cli_prompt_tokens=prompt_tokens,
+                discovery_tokens=list_tokens,
+                num_tool_calls=s["calls"],
+                tool_call_output_tokens=30,
+            )
+
+            print(f"--- {s['name']} ({s['tools']} tools) over {result['turns']} turns, {s['calls']} calls ---")
+            print(f"  Native: {result['native_total']:>8,} tokens")
+            print(f"  mcp2cli: {result['mcp2cli_total']:>7,} tokens")
+            print(f"  Saved: {result['tokens_saved']:>9,} tokens ({result['reduction_pct']}%)")
+
+            assert result["reduction_pct"] > 90, (
+                f"{s['name']}: expected >90% reduction, got {result['reduction_pct']}%"
+            )
+
+    def test_mcp_conversation_breakdown(self):
+        """Turn-by-turn token accumulation for a 30-tool MCP server.
+
+        This is the MCP equivalent of the OpenAPI conversation breakdown,
+        showing exactly where tokens are spent over 10 turns.
+        """
+        native_tools = _build_native_tool_definitions(REALISTIC_MCP_TOOLS)
+        native_per_turn = _count_tokens(json.dumps(native_tools))
+        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
+        list_tokens = len(REALISTIC_MCP_TOOLS) * 5  # ~5 tokens per tool name+desc
+
+        turns = 10
+        tool_call_turns = {3, 5, 7, 9}
+        call_output = 30
+
+        native_cumulative = 0
+        mcp2cli_cumulative = 0
+
+        print(f"\n--- {len(REALISTIC_MCP_TOOLS)}-tool MCP server over {turns} turns ---")
+        print(f"{'Turn':<6} {'Native':<12} {'mcp2cli':<12} {'Savings':<12}")
+        print("-" * 42)
+
+        for turn in range(1, turns + 1):
+            native_cumulative += native_per_turn
+            mcp2cli_cumulative += prompt_tokens
+
+            if turn == 1:
+                mcp2cli_cumulative += list_tokens
+
+            if turn in tool_call_turns:
+                native_cumulative += call_output
+                mcp2cli_cumulative += call_output
+
+            savings = native_cumulative - mcp2cli_cumulative
+            label = ""
+            if turn == 1:
+                label = " ← discovery"
+            elif turn in tool_call_turns:
+                label = " ← tool call"
+            print(f"{turn:<6} {native_cumulative:<12,} {mcp2cli_cumulative:<12,} {savings:<12,}{label}")
+
+        pct = round((1 - mcp2cli_cumulative / native_cumulative) * 100, 1)
+        print(f"\nTotal savings: {native_cumulative - mcp2cli_cumulative:,} tokens ({pct}%)")
+
+        assert pct > 90, f"Expected >90% savings over {turns} turns, got {pct}%"
+
+    def test_multi_server_scenario(self):
+        """Simulate the common case: multiple MCP servers connected at once.
+
+        This is the scenario that hurts most with native injection — every
+        server's tools get injected on every turn, even when you're only
+        using one server at a time.
+        """
+        native_tools = _build_native_tool_definitions(REALISTIC_MCP_TOOLS)
+        per_tool = _count_tokens(json.dumps(native_tools)) / len(REALISTIC_MCP_TOOLS)
+        prompt_tokens = _count_tokens(MCP2CLI_SYSTEM_PROMPT)
+
+        # 3 servers: task manager (30), filesystem (10), database (20) = 60 tools total
+        server_sizes = [30, 10, 20]
+        total_tools = sum(server_sizes)
+        native_per_turn = int(per_tool * total_tools)
+        list_tokens = total_tools * 5
+
+        result = _simulate_conversation(
+            num_turns=20,
+            native_tool_tokens=native_per_turn,
+            mcp2cli_prompt_tokens=prompt_tokens,
+            discovery_tokens=list_tokens,
+            num_tool_calls=10,
+            tool_call_output_tokens=30,
+        )
+
+        print(f"\n--- Multi-server ({' + '.join(str(s) for s in server_sizes)} = {total_tools} tools) over {result['turns']} turns ---")
+        print(f"Native per turn:  {native_per_turn:,} tokens")
+        print(f"Native total:     {result['native_total']:,} tokens")
+        print(f"mcp2cli total:    {result['mcp2cli_total']:,} tokens")
+        print(f"Tokens saved:     {result['tokens_saved']:,} ({result['reduction_pct']}%)")
+
+        assert result["reduction_pct"] > 95, f"Expected >95% reduction, got {result['reduction_pct']}%"
