@@ -77,6 +77,10 @@ mcp2cli --spec ./spec.json --raw get-data
 
 # Pipe-friendly (compact JSON when not a TTY)
 mcp2cli --spec ./spec.json list-pets | jq '.[] | .name'
+
+# TOON output — token-efficient encoding for LLM consumption
+# Best for large uniform arrays (40-60% fewer tokens than JSON)
+mcp2cli --mcp https://mcp.example.com/sse --toon list-tags
 ```
 
 ### Caching
@@ -119,6 +123,7 @@ Options:
   --list                List available subcommands
   --pretty              Pretty-print JSON output
   --raw                 Print raw response body
+  --toon                Encode output as TOON (token-efficient for LLMs)
   --version             Show version
 ```
 

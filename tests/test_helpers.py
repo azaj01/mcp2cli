@@ -1,10 +1,13 @@
 """Tests for helper functions and data structures."""
 
 import json
+import shutil
 
 from mcp2cli import (
     ParamDef,
     CommandDef,
+    _find_toon_cli,
+    _toon_encode,
     cache_key_for,
     coerce_value,
     extract_mcp_commands,
@@ -108,6 +111,73 @@ class TestOutputResult:
     def test_non_json_string(self, capsys):
         output_result("plain text", pretty=True)
         assert capsys.readouterr().out.strip() == "plain text"
+
+    def test_toon_flag_with_cli(self, capsys, monkeypatch):
+        """--toon encodes output as TOON when the CLI is available."""
+        def fake_toon_encode(json_str):
+            data = json.loads(json_str)
+            # Simulate TOON output for a simple uniform array
+            return "name: Alice\nage: 30\n"
+
+        monkeypatch.setattr("mcp2cli._toon_encode", fake_toon_encode)
+        output_result({"name": "Alice", "age": 30}, toon=True)
+        out = capsys.readouterr().out
+        assert "Alice" in out
+        assert "{" not in out  # should NOT be JSON
+
+    def test_toon_flag_fallback_when_unavailable(self, capsys, monkeypatch):
+        """--toon falls back to JSON with a warning when the CLI is missing."""
+        monkeypatch.setattr("mcp2cli._toon_encode", lambda s: None)
+        output_result({"a": 1}, toon=True, pretty=True)
+        captured = capsys.readouterr()
+        assert '"a": 1' in captured.out  # fell back to JSON
+        assert "TOON CLI" in captured.err  # printed warning
+
+
+class TestToonEncode:
+    def test_find_toon_cli_npx(self, monkeypatch):
+        """Falls back to npx when toon binary isn't in PATH."""
+        original_which = shutil.which
+        def mock_which(cmd):
+            if cmd == "toon":
+                return None
+            return original_which(cmd)
+        monkeypatch.setattr(shutil, "which", mock_which)
+        result = _find_toon_cli()
+        # Either npx is available or None
+        if shutil.which("npx") is not None:
+            assert result == "npx @toon-format/cli"
+        else:
+            assert result is None
+
+    def test_toon_encode_uniform_array(self):
+        """TOON CLI encodes a uniform array into tabular format."""
+        cli = _find_toon_cli()
+        if cli is None:
+            import pytest
+            pytest.skip("TOON CLI not available")
+        data = json.dumps([
+            {"name": "Alice", "age": 30},
+            {"name": "Bob", "age": 25},
+        ])
+        result = _toon_encode(data)
+        assert result is not None
+        assert "Alice" in result
+        assert "Bob" in result
+        # Should NOT look like JSON (TOON uses {fields} in headers, so check for JSON-specific patterns)
+        assert '"name"' not in result
+
+    def test_toon_encode_single_object(self):
+        """TOON CLI encodes a single object in YAML-like format."""
+        cli = _find_toon_cli()
+        if cli is None:
+            import pytest
+            pytest.skip("TOON CLI not available")
+        data = json.dumps({"status": "ok", "count": 42})
+        result = _toon_encode(data)
+        assert result is not None
+        assert "ok" in result
+        assert "42" in result
 
 
 class TestCaching:

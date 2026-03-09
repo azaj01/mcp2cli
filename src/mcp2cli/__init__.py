@@ -10,6 +10,8 @@ import hashlib
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -95,7 +97,37 @@ def to_kebab(name: str) -> str:
     return s.replace("_", "-").lower()
 
 
-def output_result(data, *, pretty: bool = False, raw: bool = False):
+def _find_toon_cli() -> str | None:
+    """Return the command to invoke the TOON CLI, or None if unavailable."""
+    if shutil.which("toon"):
+        return "toon"
+    # Check for npx (ships with Node.js)
+    if shutil.which("npx"):
+        return "npx @toon-format/cli"
+    return None
+
+
+def _toon_encode(json_str: str) -> str | None:
+    """Pipe JSON through the TOON CLI. Returns TOON text or None on failure."""
+    cmd = _find_toon_cli()
+    if cmd is None:
+        return None
+    try:
+        result = subprocess.run(
+            cmd.split(),
+            input=json_str,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def output_result(data, *, pretty: bool = False, raw: bool = False, toon: bool = False):
     if raw:
         if isinstance(data, str):
             print(data)
@@ -108,6 +140,17 @@ def output_result(data, *, pretty: bool = False, raw: bool = False):
         except (json.JSONDecodeError, TypeError):
             print(data)
             return
+    if toon:
+        encoded = _toon_encode(json.dumps(data))
+        if encoded is not None:
+            print(encoded, end="")
+            return
+        print(
+            "Warning: --toon requires the TOON CLI (@toon-format/cli). "
+            "Install with: npm install -g @toon-format/cli",
+            file=sys.stderr,
+        )
+        # Fall through to normal output
     if pretty or sys.stdout.isatty():
         print(json.dumps(data, indent=2))
     else:
@@ -433,6 +476,7 @@ def execute_openapi(
     auth_headers: list[tuple[str, str]],
     pretty: bool,
     raw: bool,
+    toon: bool = False,
 ):
     path = cmd.path or ""
     # Substitute path parameters
@@ -508,7 +552,7 @@ def execute_openapi(
         print(resp.text)
         return
 
-    output_result(data, pretty=pretty)
+    output_result(data, pretty=pretty, toon=toon)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +586,7 @@ def run_mcp_http(
     cache_key: str | None,
     ttl: int,
     refresh: bool,
+    toon: bool = False,
 ):
     _require_mcp()
     import anyio
@@ -558,7 +603,7 @@ def run_mcp_http(
                     await session.initialize()
                     return await _mcp_session(
                         session, tool_name, arguments, list_mode, pretty, raw,
-                        cache_key, ttl, refresh,
+                        cache_key, ttl, refresh, toon=toon,
                     )
         except Exception:
             # Fall back to SSE
@@ -569,7 +614,7 @@ def run_mcp_http(
                     await session.initialize()
                     return await _mcp_session(
                         session, tool_name, arguments, list_mode, pretty, raw,
-                        cache_key, ttl, refresh,
+                        cache_key, ttl, refresh, toon=toon,
                     )
 
     anyio.run(_run)
@@ -586,6 +631,7 @@ def run_mcp_stdio(
     cache_key: str | None,
     ttl: int,
     refresh: bool,
+    toon: bool = False,
 ):
     _require_mcp()
     import anyio
@@ -603,7 +649,7 @@ def run_mcp_stdio(
                 await session.initialize()
                 await _mcp_session(
                     session, tool_name, arguments, list_mode, pretty, raw,
-                    cache_key, ttl, refresh,
+                    cache_key, ttl, refresh, toon=toon,
                 )
 
     anyio.run(_run)
@@ -619,6 +665,7 @@ async def _mcp_session(
     cache_key: str | None,
     ttl: int,
     refresh: bool,
+    toon: bool = False,
 ):
     result = await session.list_tools()
     tools = [
@@ -647,7 +694,7 @@ async def _mcp_session(
             output_parts.append(content.data)
 
     text = "\n".join(output_parts) if output_parts else ""
-    output_result(text, pretty=pretty, raw=raw)
+    output_result(text, pretty=pretty, raw=raw, toon=toon)
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +714,7 @@ def handle_mcp(
     cache_key_override: str | None,
     ttl: int,
     refresh: bool,
+    toon: bool = False,
 ):
     _require_mcp()
 
@@ -674,9 +722,9 @@ def handle_mcp(
 
     if list_mode:
         if is_stdio:
-            run_mcp_stdio(source, env_vars, None, None, True, pretty, raw, key, ttl, refresh)
+            run_mcp_stdio(source, env_vars, None, None, True, pretty, raw, key, ttl, refresh, toon=toon)
         else:
-            run_mcp_http(source, auth_headers, None, None, True, pretty, raw, key, ttl, refresh)
+            run_mcp_http(source, auth_headers, None, None, True, pretty, raw, key, ttl, refresh, toon=toon)
         return
 
     # We need tool list to build argparse, try cache first
@@ -721,12 +769,12 @@ def handle_mcp(
     if is_stdio:
         run_mcp_stdio(
             source, env_vars, cmd.tool_name, arguments, False,
-            pretty, raw, key, ttl, refresh,
+            pretty, raw, key, ttl, refresh, toon=toon,
         )
     else:
         run_mcp_http(
             source, auth_headers, cmd.tool_name, arguments, False,
-            pretty, raw, key, ttl, refresh,
+            pretty, raw, key, ttl, refresh, toon=toon,
         )
 
 
@@ -818,6 +866,16 @@ def main():
     pre.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     pre.add_argument("--raw", action="store_true", help="Print raw response body")
     pre.add_argument(
+        "--toon",
+        action="store_true",
+        help=(
+            "Encode output as TOON (Token-Oriented Object Notation) instead of JSON. "
+            "TOON is 40-60%% more token-efficient for uniform arrays (e.g. list-tags, "
+            "list-users) and 15-20%% for semi-uniform data. Best for LLM consumption "
+            "of large result sets. Requires @toon-format/cli (npm install -g @toon-format/cli)."
+        ),
+    )
+    pre.add_argument(
         "--env",
         action="append",
         default=[],
@@ -874,6 +932,7 @@ def main():
             pre_args.cache_key,
             pre_args.cache_ttl,
             pre_args.refresh,
+            toon=pre_args.toon,
         )
         return
 
@@ -925,7 +984,7 @@ def main():
         sys.exit(1)
 
     cmd: CommandDef = args._cmd
-    execute_openapi(args, cmd, base_url, auth_headers, pre_args.pretty, pre_args.raw)
+    execute_openapi(args, cmd, base_url, auth_headers, pre_args.pretty, pre_args.raw, toon=pre_args.toon)
 
 
 if __name__ == "__main__":
