@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "2.2.2"
+__version__ = "2.2.3"
 
 # --- Constants ---
 from mcp2cli._cache import CACHE_DIR, DEFAULT_CACHE_TTL, CONFIG_DIR, BAKED_FILE
