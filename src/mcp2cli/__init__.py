@@ -352,9 +352,25 @@ def _handle_http_error(resp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cache_key_for(source: str) -> str:
-    return hashlib.sha256(source.encode()).hexdigest()[:16]
+def cache_key_for(config: dict) -> str:
+    """
+    Generate cache key from tool configuration dict.
 
+    Hashes all config fields that affect MCP server behavior to ensure
+    unique caching for tools with the same URL but different configurations.
+    """
+    # Exclude fields that don't affect which tools are returned
+    cache_config = {
+        k: v for k, v in config.items()
+        if k not in ('cache_ttl', 'description', 'include', 'exclude', 'methods')
+    }
+    # Ensure auth_headers are sorted for stable hashing
+    if 'auth_headers' in cache_config and cache_config['auth_headers']:
+        cache_config['auth_headers'] = sorted(cache_config['auth_headers'])
+
+    return hashlib.sha256(
+        json.dumps(cache_config, sort_keys=True).encode()
+    ).hexdigest()[:16]
 
 def load_cached(key: str, ttl: int) -> dict | None:
     path = CACHE_DIR / f"{key}.json"
@@ -663,7 +679,10 @@ def load_openapi_spec(
     is_url = source.startswith("http://") or source.startswith("https://")
 
     if is_url:
-        key = cache_key or cache_key_for(source)
+        key = cache_key or cache_key_for({
+            'source': source,
+            'auth_headers': auth_headers,
+        })
         if not refresh:
             cached = load_cached(key, ttl)
             if cached is not None:
@@ -1045,7 +1064,10 @@ def load_graphql_schema(
     oauth_provider: "httpx.Auth | None" = None,
 ) -> dict:
     """POST introspection query to a GraphQL endpoint, with caching."""
-    key = cache_key or cache_key_for(f"graphql:{url}")
+    key = cache_key or cache_key_for({
+        'source': f"graphql:{url}",
+        'auth_headers': auth_headers,
+    })
     if not refresh:
         cached = load_cached(key, ttl)
         if cached is not None:
@@ -2810,7 +2832,16 @@ def handle_mcp(
     head: int | None = None,
     verbose: bool = False,
 ):
-    key = cache_key_override or cache_key_for(source)
+    # Build a config dict for cache key generation (future-proof)
+    config_for_cache = {
+        'source': source,
+        'auth_headers': auth_headers,
+        'transport': transport,
+        'env_vars': env_vars,
+        'is_stdio': is_stdio,
+    }
+    
+    key = cache_key_override or cache_key_for(config_for_cache)
 
     # Resource/prompt operations skip the tool flow entirely
     if resource_action or prompt_action:
