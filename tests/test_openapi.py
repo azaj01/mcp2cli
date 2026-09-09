@@ -586,3 +586,101 @@ class TestPathLevelParameters:
         }
         cmd = extract_openapi_commands(spec)[0]
         assert cmd.params == []
+def _collision_spec(*entries):
+    """Build a spec from (path, method, operationId) triples."""
+    paths: dict = {}
+    for path, method, op_id in entries:
+        op: dict = {"responses": {}}
+        if op_id is not None:
+            op["operationId"] = op_id
+        paths.setdefault(path, {})[method] = op
+    return {"openapi": "3.0.0", "paths": paths}
+
+
+class TestCommandNameCollisions:
+    """Colliding OpenAPI command names must stay unique and addressable."""
+
+    def test_three_way_collision_stays_unique(self):
+        spec = _collision_spec(
+            ("/a", "post", "doThing"),
+            ("/b", "post", "doThing"),
+            ("/c", "post", "doThing"),
+        )
+        names = [c.name for c in extract_openapi_commands(spec)]
+        assert len(names) == len(set(names))
+        assert names == ["do-thing", "do-thing-post", "do-thing-post-2"]
+
+    def test_three_way_collision_builds_a_parser(self):
+        spec = _collision_spec(
+            ("/a", "post", "doThing"),
+            ("/b", "post", "doThing"),
+            ("/c", "post", "doThing"),
+        )
+        cmds = extract_openapi_commands(spec)
+        parser = build_argparse(cmds, argparse.ArgumentParser(add_help=False))
+        for cmd in cmds:
+            args = parser.parse_args([cmd.name])
+            assert args._cmd is cmd
+
+    def test_method_suffix_used_when_free(self):
+        spec = _collision_spec(
+            ("/a", "get", "doThing"),
+            ("/b", "post", "doThing"),
+        )
+        assert [c.name for c in extract_openapi_commands(spec)] == [
+            "do-thing",
+            "do-thing-post",
+        ]
+
+    def test_alias_never_shadows_another_natural_name(self):
+        spec = _collision_spec(
+            ("/a", "post", "doThing"),
+            ("/b", "post", "doThing"),
+            ("/c", "post", "doThingPost"),
+        )
+        cmds = extract_openapi_commands(spec)
+        names = [c.name for c in cmds]
+        assert len(names) == len(set(names))
+        by_op = {c.path: c.name for c in cmds}
+        assert by_op["/c"] == "do-thing-post"
+        assert by_op["/b"] == "do-thing-post-2"
+
+    def test_pathless_slug_names_still_unique(self):
+        spec = _collision_spec(
+            ("/items", "get", None),
+            ("/items", "post", None),
+        )
+        names = [c.name for c in extract_openapi_commands(spec)]
+        assert names == ["get-items", "post-items"]
+
+    def test_no_collision_leaves_names_untouched(self):
+        spec = _collision_spec(
+            ("/a", "get", "listThings"),
+            ("/b", "post", "createThing"),
+        )
+        assert [c.name for c in extract_openapi_commands(spec)] == [
+            "list-things",
+            "create-thing",
+        ]
+
+    def test_distinct_operation_ids_that_kebab_alike_stay_addressable(self):
+        # A perfectly valid spec: four different operationIds that all
+        # normalize to the same CLI name. Every operation must keep its own
+        # command, and that command must carry its own path and method.
+        spec = _collision_spec(
+            ("/pets", "get", "listPets"),
+            ("/pets", "post", "list-pets"),
+            ("/pets/all", "get", "list_pets"),
+            ("/pets/legacy", "get", "ListPets"),
+        )
+        cmds = extract_openapi_commands(spec)
+        wire = {c.name: (c.method, c.path) for c in cmds}
+        assert wire == {
+            "list-pets": ("get", "/pets"),
+            "list-pets-post": ("post", "/pets"),
+            "list-pets-get": ("get", "/pets/all"),
+            "list-pets-get-2": ("get", "/pets/legacy"),
+        }
+        parser = build_argparse(cmds, argparse.ArgumentParser(add_help=False))
+        for cmd in cmds:
+            assert parser.parse_args([cmd.name])._cmd is cmd
