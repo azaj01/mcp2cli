@@ -3510,9 +3510,8 @@ def session_start(
     # Route both streams to the session log rather than /dev/null: sandboxes
     # that deny opening /dev/null (agent runners, hardened containers) would
     # otherwise fail the spawn with PermissionError before the daemon starts.
-    # stdin is a closed pipe for the same reason -- the daemon never reads it.
-    log_file = open(log_path, "a")
-    try:
+    # Popen resolves DEVNULL by opening /dev/null in this process.
+    with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -3524,8 +3523,8 @@ def session_start(
             stderr=log_file,
             stdin=subprocess.PIPE,
         )
-    finally:
-        log_file.close()
+    # The daemon never reads stdin; closing the write end hands it EOF and
+    # leaves no descriptor behind in the parent.
     if proc.stdin is not None:
         proc.stdin.close()
 
