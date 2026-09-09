@@ -2857,14 +2857,17 @@ def _exc_message(exc: BaseException) -> str:
 
 def _is_disconnect(exc: BaseException) -> bool:
     """Report whether a leaf exception means the server dropped the connection."""
-    if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
-        return True
-    disconnect_types: list[type[BaseException]] = []
-    for name in ("EndOfStream", "BrokenResourceError", "ClosedResourceError"):
-        candidate = getattr(anyio, name, None)
-        if isinstance(candidate, type) and issubclass(candidate, BaseException):
-            disconnect_types.append(candidate)
-    return bool(disconnect_types) and isinstance(exc, tuple(disconnect_types))
+    return isinstance(
+        exc,
+        (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            anyio.EndOfStream,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+        ),
+    )
 
 
 def _run_mcp_clean(fn, source: str):

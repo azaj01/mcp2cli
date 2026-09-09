@@ -1,5 +1,6 @@
 """Tests for MCP mode — stdio and HTTP transports."""
 
+import builtins
 import json
 import subprocess
 import sys
@@ -737,6 +738,11 @@ class TestConnectionErrors:
 
     def test_broken_pipe_inside_nested_groups_gets_disconnect_hint(self, capsys):
         from mcp2cli import _run_mcp_clean
+
+        if sys.version_info < (3, 11):
+            from exceptiongroup import BaseExceptionGroup
+        else:
+            BaseExceptionGroup = builtins.BaseExceptionGroup
 
         async def broken_pipe():
             raise BaseExceptionGroup(
