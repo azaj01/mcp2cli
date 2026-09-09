@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from datetime import datetime, timezone
 
@@ -1386,8 +1386,70 @@ def build_oauth_provider(
 # ---------------------------------------------------------------------------
 
 
+def _json_pointer_unescape(token: str) -> str:
+    """Decode RFC 6901 escapes: ``~1`` is ``/`` and ``~0`` is ``~``.
+
+    Order matters -- ``~1`` first, or ``~01`` would wrongly become ``/``.
+    """
+    return token.replace("~1", "/").replace("~0", "~")
+
+
+def _json_pointer_tokens(fragment: str) -> list[str]:
+    """Split a URI fragment into decoded JSON Pointer reference tokens.
+
+    A ``$ref`` is a URI, so RFC 6901 section 6 percent-encodes the pointer it
+    carries in the fragment. Decoding therefore unwinds the two layers in the
+    order they were applied: percent-decode the whole fragment first, then
+    split on the ``/`` separators it now spells out, then decode the ``~``
+    escapes the encoding was applied over. A member name holding a ``/`` is
+    ``~1`` (or ``%7E1``), a ``~`` is ``~0``, and a literal ``%`` is ``%25``.
+    """
+    return [_json_pointer_unescape(t) for t in unquote(fragment).split("/")]
+
+
+# RFC 6901: an array index is "0", or a digit string with no leading zero.
+# ``int()`` is far more generous -- it accepts "-1" (which would silently
+# select the *last* element), "+1", "01", " 1 ", "1_0" and Unicode digits --
+# so a token is screened before conversion.
+_ARRAY_INDEX_RE = re.compile(r"0|[1-9][0-9]*")
+
+
+def _array_index(token: str, length: int) -> int | None:
+    """Index *token* addresses in a list of *length*, or None if it does not."""
+    if not length or not _ARRAY_INDEX_RE.fullmatch(token):
+        return None
+    # Both strings are canonical decimals, so (width, lexicographic) orders
+    # them numerically. Comparing them before converting keeps a spec from
+    # handing int() an arbitrarily long digit run, where CPython's
+    # integer-string conversion limit -- which a host may raise or disable --
+    # would decide what happens instead of us.
+    largest = str(length - 1)
+    if (len(token), token) > (len(largest), largest):
+        return None
+    return int(token)
+
+
+def _json_pointer_lookup(root, tokens: list[str]):
+    """Walk *root* by decoded pointer tokens. Raises LookupError on a dangle."""
+    target = root
+    for token in tokens:
+        if isinstance(target, dict):
+            if token not in target:
+                raise LookupError(token)
+            target = target[token]
+        elif isinstance(target, list):
+            index = _array_index(token, len(target))
+            if index is None:
+                raise LookupError(token)
+            target = target[index]
+        else:
+            raise LookupError(token)
+    return target
+
+
 def resolve_refs(spec: dict) -> dict:
     spec = copy.deepcopy(spec)
+    warned: set[str] = set()
 
     def _resolve(node, root, seen):
         if isinstance(node, dict):
@@ -1397,10 +1459,23 @@ def resolve_refs(spec: dict) -> dict:
                     return node
                 seen = seen | {ref}
                 if ref.startswith("#/"):
-                    parts = ref[2:].split("/")
-                    target = root
-                    for p in parts:
-                        target = target[p]
+                    try:
+                        target = _json_pointer_lookup(
+                            root, _json_pointer_tokens(ref[2:])
+                        )
+                    except LookupError:
+                        # A dangling reference in a spec we did not write must
+                        # not take down the CLI. Leave the node unresolved --
+                        # the same shape external refs and cycles already
+                        # produce -- and say so once.
+                        if ref not in warned:
+                            warned.add(ref)
+                            print(
+                                f"Warning: unresolvable $ref {ref!r} in spec; "
+                                "leaving it unresolved.",
+                                file=sys.stderr,
+                            )
+                        return node
                     return _resolve(copy.deepcopy(target), root, seen)
                 return node
             return {k: _resolve(v, root, seen) for k, v in node.items()}
