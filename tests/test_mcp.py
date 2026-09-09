@@ -719,16 +719,60 @@ class TestConnectionErrors:
         assert "Traceback" in r.stderr
 
 
-    def test_run_mcp_clean_server_disconnect(self, capsys):
+    def test_empty_end_of_stream_gets_disconnect_hint(self, capsys):
         import anyio
+
         from mcp2cli import _run_mcp_clean
 
-        async def throw_disconnect():
-            raise anyio.EndOfStream("Server disconnected")
+        async def end_of_stream():
+            raise anyio.EndOfStream()
 
         with pytest.raises(SystemExit) as caught:
-            _run_mcp_clean(throw_disconnect, "test")
-        
+            _run_mcp_clean(end_of_stream, "test")
+
         assert caught.value.code == 1
-        captured = capsys.readouterr()
-        assert "the server disconnected unexpectedly" in captured.err
+        err = capsys.readouterr().err
+        assert "cannot use MCP server at test" in err
+        assert "disconnected unexpectedly" in err
+
+    def test_broken_pipe_inside_nested_groups_gets_disconnect_hint(self, capsys):
+        from mcp2cli import _run_mcp_clean
+
+        async def broken_pipe():
+            raise BaseExceptionGroup(
+                "outer",
+                [BaseExceptionGroup("inner", [BrokenPipeError(32, "Broken pipe")])],
+            )
+
+        with pytest.raises(SystemExit):
+            _run_mcp_clean(broken_pipe, "test")
+
+        err = capsys.readouterr().err
+        assert "Broken pipe" in err
+        assert "disconnected unexpectedly" in err
+
+    def test_unrelated_failure_gets_no_disconnect_hint(self, capsys):
+        from mcp2cli import _run_mcp_clean
+
+        async def unrelated():
+            raise RuntimeError("no package metadata for endofstream disconnect")
+
+        with pytest.raises(SystemExit):
+            _run_mcp_clean(unrelated, "test")
+
+        err = capsys.readouterr().err
+        assert "no package metadata" in err
+        assert "disconnected unexpectedly" not in err
+
+    def test_disconnect_in_debug_mode_reraises_original(self, monkeypatch):
+        import anyio
+
+        from mcp2cli import _run_mcp_clean
+
+        monkeypatch.setenv("MCP2CLI_DEBUG", "1")
+
+        async def end_of_stream():
+            raise anyio.EndOfStream()
+
+        with pytest.raises(anyio.EndOfStream):
+            _run_mcp_clean(end_of_stream, "test")

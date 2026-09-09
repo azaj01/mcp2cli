@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import version as _pkg_version
 
-try:
-    __version__ = _pkg_version("mcp2cli")
-except Exception:
-    __version__ = "0.0.0-dev"
+__version__ = _pkg_version("mcp2cli")
 
 import argparse
 import copy
@@ -2858,6 +2855,18 @@ def _exc_message(exc: BaseException) -> str:
     return "; ".join(part for part in parts if part) or exc.__class__.__name__
 
 
+def _is_disconnect(exc: BaseException) -> bool:
+    """Report whether a leaf exception means the server dropped the connection."""
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    disconnect_types: list[type[BaseException]] = []
+    for name in ("EndOfStream", "BrokenResourceError", "ClosedResourceError"):
+        candidate = getattr(anyio, name, None)
+        if isinstance(candidate, type) and issubclass(candidate, BaseException):
+            disconnect_types.append(candidate)
+    return bool(disconnect_types) and isinstance(exc, tuple(disconnect_types))
+
+
 def _run_mcp_clean(fn, source: str):
     """Run an MCP coroutine, reporting failures as one clean error line.
 
@@ -2884,8 +2893,11 @@ def _run_mcp_clean(fn, source: str):
                 " — the server rejected the request; pass credentials with "
                 "--auth-header 'Name:Value' or use the --oauth-* options"
             )
-        elif any(phrase in lowered for phrase in ["endofstream", "brokenpipeerror", "connection closed", "disconnect"]):
-            hint = " — the server disconnected unexpectedly. It may have crashed or terminated."
+        elif any(_is_disconnect(leaf) for leaf in leaves):
+            hint = (
+                " — the server disconnected unexpectedly; it may have crashed "
+                "or exited. Check the server command and its logs"
+            )
         else:
             hint = ""
         print(f"Error: cannot use MCP server at {source}: {message}{hint}", file=sys.stderr)
