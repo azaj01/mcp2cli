@@ -334,3 +334,86 @@ class TestCacheCorruptionResilience:
             m.save_cache("abc", {"bad": object()})
         assert m.load_cached("abc", 3600) == {"good": True}
         assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]
+
+    def test_concurrent_writers_never_expose_a_partial_entry(
+        self, monkeypatch, tmp_path
+    ):
+        """Threads of one process must not splice each other's writes.
+
+        Every reader has to see one writer's payload whole. A torn entry
+        shows up as a miss (load_cached swallows the damage), so a reader
+        that gets None while an entry has existed the whole time is the
+        observable symptom.
+        """
+        m = self._isolate(monkeypatch, tmp_path)
+        blob_len = 200_000
+        payloads = [{"writer": i, "blob": str(i) * blob_len} for i in range(4)]
+        m.save_cache("abc", payloads[0])
+
+        def intact(entry):
+            return (
+                isinstance(entry, dict)
+                and entry.get("blob") == str(entry.get("writer")) * blob_len
+            )
+
+        stop = threading.Event()
+        bad_reads = []
+        write_errors = []
+
+        def writer(payload):
+            try:
+                for _ in range(15):
+                    m.save_cache("abc", payload)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                write_errors.append(repr(exc))
+
+        def reader():
+            while not stop.is_set():
+                entry = m.load_cached("abc", 3600)
+                if not intact(entry):
+                    bad_reads.append(entry if entry is None else "spliced")
+
+        readers = [threading.Thread(target=reader) for _ in range(2)]
+        for t in readers:
+            t.start()
+        writers = [threading.Thread(target=writer, args=(p,)) for p in payloads]
+        for t in writers:
+            t.start()
+        for t in writers:
+            t.join(timeout=60)
+        stop.set()
+        for t in readers:
+            t.join(timeout=60)
+
+        assert write_errors == []
+        assert bad_reads == []
+        assert intact(m.load_cached("abc", 3600))
+        assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [OSError(28, "No space left on device"), KeyboardInterrupt()],
+        ids=["disk-full", "ctrl-c"],
+    )
+    def test_failed_publish_preserves_the_previous_entry(
+        self, monkeypatch, tmp_path, failure
+    ):
+        """A save that dies before publishing keeps the entry already on disk.
+
+        A disk filling up and a Ctrl-C are the two ways this happens in
+        practice; neither may destroy a good entry or leave debris in the
+        cache directory.
+        """
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"good": True})
+
+        def boom(*_args, **_kwargs):
+            raise failure
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(m.os, "replace", boom)
+            with pytest.raises(type(failure)):
+                m.save_cache("abc", {"replacement": True})
+
+        assert m.load_cached("abc", 3600) == {"good": True}
+        assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]

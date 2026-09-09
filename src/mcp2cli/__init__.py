@@ -20,6 +20,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -658,19 +659,33 @@ def save_cache(key: str, data: dict):
     A plain write_text() is not atomic: an interrupt, a full disk or two
     concurrent mcp2cli runs can leave a half-written file behind, which is
     how a cache entry becomes corrupt in the first place. Serialise first,
-    write to a private temp file in the same directory, then os.replace()
-    it into place -- readers only ever observe the old file or the new one.
+    write to a freshly created private temp file in the same directory, then
+    os.replace() it into place -- readers only ever observe the old file or
+    the new one.
+
+    The temp file comes from tempfile.mkstemp(), so every writer gets storage
+    of its own. A pid-derived name does not: two threads of one process share
+    it, and each open() truncates whatever the other has written so far, so
+    the file that gets replaced into place is a splice of both payloads.
+
+    Any failure -- including Ctrl-C -- removes the temp file and leaves the
+    entry already on disk untouched.
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / f"{key}.json"
     payload = json.dumps(data)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd, tmp = tempfile.mkstemp(
+        dir=str(CACHE_DIR), prefix=f"{path.name}.", suffix=".tmp"
+    )
     try:
-        tmp.write_text(payload)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
         try:
-            tmp.unlink()
+            os.unlink(tmp)
         except OSError:
             pass
         raise
