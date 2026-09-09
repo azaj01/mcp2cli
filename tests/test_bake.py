@@ -549,3 +549,95 @@ class TestBakeInstall:
         )
         assert r.returncode == 0
         assert "may not be in your PATH" not in r.stdout
+
+
+class TestBakeShowMasking:
+    """`bake show` output must be safe to paste, without changing what runs."""
+
+    def _create(self, cfg_dir, cache_dir, name, *extra):
+        r = _run(
+            "bake", "create", name,
+            "--spec", "https://api.example.com/openapi.json",
+            *extra,
+            config_dir=cfg_dir, cache_dir=cache_dir,
+        )
+        assert r.returncode == 0, r.stderr
+
+    def _show(self, cfg_dir, cache_dir, name):
+        r = _run("bake", "show", name, config_dir=cfg_dir, cache_dir=cache_dir)
+        assert r.returncode == 0, r.stderr
+        return r, json.loads(r.stdout)
+
+    @staticmethod
+    def _assert_redacted(shown, secret, output):
+        # The secret must never reach a terminal, and whatever hint is left
+        # behind may be no more than a short prefix of it.
+        assert secret not in output
+        visible = shown.rstrip("*")
+        assert len(visible) <= 4, shown
+        assert secret.startswith(visible), shown
+
+    def test_oauth_client_secret_is_redacted(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        secret = "sk-super-secret-value"
+        self._create(
+            cfg_dir, cache_dir, "mask-lit",
+            "--oauth-client-id", "my-client-id",
+            "--oauth-client-secret", secret,
+        )
+        r, cfg = self._show(cfg_dir, cache_dir, "mask-lit")
+        self._assert_redacted(cfg["oauth_client_secret"], secret, r.stdout + r.stderr)
+        # The client id is not a secret and stays diagnosable.
+        assert cfg["oauth_client_id"] == "my-client-id"
+
+    def test_secret_shorter_than_the_hint_is_not_disclosed(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(
+            cfg_dir, cache_dir, "mask-short",
+            "--oauth-client-id", "my-client-id",
+            "--oauth-client-secret", "abcd",
+        )
+        r, cfg = self._show(cfg_dir, cache_dir, "mask-short")
+        assert "abcd" not in r.stdout + r.stderr
+        assert cfg["oauth_client_secret"].strip("*") == ""
+
+    def test_auth_header_value_is_redacted(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        token = "Bearer tok-abcdef123456"
+        self._create(cfg_dir, cache_dir, "mask-hdr", "--auth-header", f"Authorization:{token}")
+        r, cfg = self._show(cfg_dir, cache_dir, "mask-hdr")
+        (header_name, shown), = cfg["auth_headers"]
+        # Header names are not secrets — you need them to diagnose auth.
+        assert header_name == "Authorization"
+        self._assert_redacted(shown, token, r.stdout + r.stderr)
+
+    @pytest.mark.parametrize("ref", ["env:OAUTH_SECRET", "file:/run/secrets/oauth"])
+    def test_indirect_references_stay_readable(self, tmp_path, ref):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(
+            cfg_dir, cache_dir, "mask-ref",
+            "--oauth-client-secret", ref,
+            "--auth-header", f"X-Key:{ref}",
+        )
+        _, cfg = self._show(cfg_dir, cache_dir, "mask-ref")
+        assert cfg["oauth_client_secret"] == ref
+        assert cfg["auth_headers"] == [["X-Key", ref]]
+
+    def test_masking_does_not_change_what_the_baked_tool_sends(self, tmp_path, monkeypatch):
+        import mcp2cli
+
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        secret, token = "sk-super-secret-value", "Bearer tok-abcdef123456"
+        self._create(
+            cfg_dir, cache_dir, "mask-run",
+            "--oauth-client-id", "my-client-id",
+            "--oauth-client-secret", secret,
+            "--auth-header", f"Authorization:{token}",
+        )
+        self._show(cfg_dir, cache_dir, "mask-run")
+
+        # What `mcp2cli @mask-run ...` would run with: the real credentials.
+        monkeypatch.setattr(mcp2cli, "BAKED_FILE", cfg_dir / "baked.json")
+        argv = _baked_to_argv(_load_baked("mask-run"))
+        assert secret in argv
+        assert f"Authorization:{token}" in argv
