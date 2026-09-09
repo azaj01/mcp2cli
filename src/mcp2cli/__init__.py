@@ -2827,28 +2827,30 @@ def _collect_openapi_params(
             if val is not None:
                 path = path.replace(f"{{{p.original_name}}}", str(val))
 
-    if cmd.method == "get":
-        for p in cmd.params:
-            val = getattr(args, _param_dest(p), None)
-            if val is None:
-                continue
-            if p.location == "query":
-                query_params[p.original_name] = coerce_value(val, p.schema)
-            elif p.location == "header":
-                extra_headers[p.original_name] = str(val)
-    else:
+    # Query and header values are transport metadata on every verb, so gather
+    # them once here -- including when --stdin supplies the body, which used to
+    # skip the header pass entirely and silently drop header parameters.
+    for p in cmd.params:
+        val = getattr(args, _param_dest(p), None)
+        if val is None:
+            continue
+        if p.location == "query":
+            query_params[p.original_name] = coerce_value(val, p.schema)
+        elif p.location == "header":
+            extra_headers[p.original_name] = str(val)
+
+    if cmd.method != "get":
         if getattr(args, "stdin", False) is True:
             body = read_stdin_json("OpenAPI request body")
         else:
             body = {}
             for p in cmd.params:
+                if p.location in ("path", "query", "header", "cookie"):
+                    # Path values travel in the URL, query and header values are
+                    # collected above, and a cookie parameter is not a body field
+                    # either. None of them belong in the JSON payload.
+                    continue
                 val = getattr(args, _param_dest(p), None)
-                if p.location == "header":
-                    if val is not None:
-                        extra_headers[p.original_name] = str(val)
-                    continue
-                if p.location == "path":
-                    continue
                 if p.location == "file":
                     if val is not None:
                         fp = Path(val)
@@ -2864,12 +2866,6 @@ def _collect_openapi_params(
                     body[p.original_name] = coerce_value(val, p.schema)
             if not body:
                 body = None
-        # Also collect query params for non-GET
-        for p in cmd.params:
-            if p.location == "query":
-                val = getattr(args, _param_dest(p), None)
-                if val is not None:
-                    query_params[p.original_name] = coerce_value(val, p.schema)
 
     return path, query_params, extra_headers, body, files
 
