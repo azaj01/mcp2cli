@@ -7,12 +7,10 @@ the spawn with PermissionError before the daemon existed:
 
     PermissionError: [Errno 13] Permission denied: '/dev/null'
 
-These tests deny exactly that `os.open` and then start a real daemon against
-the local stdio MCP test server, so they fail on the old spawn and pass on the
-current one.
+Both tests deny exactly that `os.open` and start a real daemon, so they fail
+on the old spawn and pass on the current one.
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -21,9 +19,6 @@ import pytest
 import mcp2cli
 
 _PROC_FD = Path("/proc/self/fd")
-needs_proc = pytest.mark.skipif(
-    not _PROC_FD.exists(), reason="descriptor introspection needs /proc"
-)
 
 
 @pytest.fixture
@@ -59,14 +54,23 @@ def _deny_dev_null(monkeypatch):
     monkeypatch.setattr(os, "open", guarded)
 
 
-def _fd_targets(pid: int | str = "self") -> dict[str, str]:
-    targets = {}
-    for entry in Path(f"/proc/{pid}/fd").iterdir():
+def _text_content(result: dict) -> list[str]:
+    return [
+        item["text"] for item in result["content"] if item.get("type") == "text"
+    ]
+
+
+def _parent_holds(log_path: Path) -> bool:
+    """Whether this process still has the session log open."""
+    if not _PROC_FD.exists():
+        pytest.skip("descriptor introspection needs /proc")
+    for entry in _PROC_FD.iterdir():
         try:
-            targets[entry.name] = os.readlink(entry)
+            if os.readlink(entry) == str(log_path):
+                return True
         except OSError:  # descriptor closed while we walked the directory
             continue
-    return targets
+    return False
 
 
 def test_session_serves_calls_where_dev_null_is_denied(
@@ -85,56 +89,43 @@ def test_session_serves_calls_where_dev_null_is_denied(
     ]
     assert "echo" in names
 
-    # Two consecutive calls: an EOF stdin must not knock the daemon over
-    # between requests.
-    result = mcp2cli._session_request(
+    echoed = mcp2cli._session_request(
         "sandboxed",
         "call_tool",
         {"name": "echo", "arguments": {"message": "via session"}},
     )
-    assert "via session" in json.dumps(result)
-    result = mcp2cli._session_request(
+    assert _text_content(echoed) == ["via session"]
+    assert echoed["isError"] is False
+
+    # A second call: the daemon's EOF stdin must not knock it over between
+    # requests.
+    summed = mcp2cli._session_request(
         "sandboxed",
         "call_tool",
         {"name": "add_numbers", "arguments": {"a": 2, "b": 3}},
     )
-    assert "5" in json.dumps(result)
+    assert _text_content(summed) == ["5"]
+    assert summed["isError"] is False
+
+    # The spawn handed its log descriptor to the daemon and kept none.
+    assert not _parent_holds(mcp2cli._session_log_path("sandboxed"))
 
 
-@needs_proc
-def test_daemon_streams_land_in_the_session_log(
-    session_home, started, mcp_test_server_cmd, capsys
+def test_failed_daemon_reports_through_the_session_log(
+    session_home, monkeypatch, capsys
 ):
-    """The live daemon's own descriptors: log for output, EOF pipe for input."""
-    started.append("logged")
-
-    mcp2cli.session_start("logged", mcp_test_server_cmd, True, [], {})
-    capsys.readouterr()
-
-    log_path = mcp2cli._session_log_path("logged")
-    assert log_path.exists()
-
-    pid = json.loads(mcp2cli._session_meta_path("logged").read_text())["pid"]
-    fds = _fd_targets(pid)
-    assert fds["1"] == str(log_path)
-    assert fds["2"] == str(log_path)
-    assert fds["0"].startswith("pipe:")
-
-    # The parent kept neither the log handle nor the stdin pipe.
-    assert str(log_path) not in _fd_targets().values()
-
-
-@needs_proc
-def test_failed_spawn_leaves_no_log_descriptor_behind(session_home, capsys):
-    """The daemon dies immediately; the parent must not leak its log handle."""
-    # No such binary: the daemon raises on spawn and exits at once.
+    """A daemon that dies must leave its diagnostics in the log, not nowhere."""
+    _deny_dev_null(monkeypatch)
+    # No such binary: the daemon raises on spawn and exits with a traceback.
     dead_server = "mcp2cli-nonexistent-test-server"
 
     with pytest.raises(SystemExit) as exc:
         mcp2cli.session_start("broken", dead_server, True, [], {})
     assert exc.value.code == 1
-    capsys.readouterr()
+    assert "session daemon" in capsys.readouterr().err
 
     log_path = mcp2cli._session_log_path("broken")
-    assert log_path.exists()
-    assert str(log_path) not in _fd_targets().values()
+    # The daemon's uncaught traceback reached the log instead of /dev/null.
+    assert "Traceback" in log_path.read_text()
+    assert not _parent_holds(log_path)
+    assert not mcp2cli._session_sock_path("broken").exists()
