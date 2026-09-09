@@ -3175,7 +3175,7 @@ def _exc_message(exc: BaseException) -> str:
 
 def _is_disconnect(exc: BaseException) -> bool:
     """Report whether a leaf exception means the server dropped the connection."""
-    return isinstance(
+    if isinstance(
         exc,
         (
             BrokenPipeError,
@@ -3185,7 +3185,15 @@ def _is_disconnect(exc: BaseException) -> bool:
             anyio.BrokenResourceError,
             anyio.ClosedResourceError,
         ),
-    )
+    ):
+        return True
+    try:  # MCP SDK v2
+        from mcp.shared.exceptions import MCPError
+        from mcp_types import CONNECTION_CLOSED
+    except ImportError:  # MCP SDK v1
+        from mcp.shared.exceptions import McpError as MCPError
+        from mcp.types import CONNECTION_CLOSED
+    return isinstance(exc, MCPError) and exc.error.code == CONNECTION_CLOSED
 
 
 def _run_mcp_clean(fn, source: str):
