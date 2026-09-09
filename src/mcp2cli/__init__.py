@@ -840,6 +840,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
     auth_code: str | None = None
     state: str | None = None
+    iss: str | None = None
     error: str | None = None
     done = threading.Event()
 
@@ -852,7 +853,10 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         elif "code" in params:
             _CallbackHandler.auth_code = params["code"][0]
             _CallbackHandler.state = params.get("state", [None])[0]
-            _CallbackHandler.iss = params.get("iss", [None])[0]
+            # RFC 9207: an absent issuer must stay absent -- the SDK only
+            # rejects a missing ``iss`` when the server advertised it, and an
+            # empty ``iss=`` would instead fail as a mismatch.
+            _CallbackHandler.iss = params.get("iss", [None])[0] or None
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -914,7 +918,10 @@ def _parse_oauth_callback_input(text: str) -> tuple[str, str, str | None]:
             "That URL has no 'state' parameter. Paste the URL unmodified -- "
             "the MCP SDK verifies state to prevent CSRF and rejects a missing one."
         )
-    return params["code"][0], params["state"][0], params.get("iss", [None])[0]
+    # ``or None``: an empty ``iss=`` is treated as absent, which the SDK
+    # accepts unless the server advertised the parameter, rather than as a
+    # mismatching issuer.
+    return params["code"][0], params["state"][0], params.get("iss", [None])[0] or None
 
 
 def _prompt_oauth_callback(attempts: int = 3) -> tuple[str, str, str | None]:
@@ -1336,7 +1343,7 @@ def build_oauth_provider(
             return _authorization_code_result(
                 _CallbackHandler.auth_code,
                 _CallbackHandler.state,
-                getattr(_CallbackHandler, "iss", None),
+                _CallbackHandler.iss,
             )
 
     return _RobustOAuthClientProvider(

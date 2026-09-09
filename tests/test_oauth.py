@@ -29,9 +29,10 @@ def _code_state(result):
     return (result.code, result.state)
 
 
-def _result_iss(result):
-    """The RFC 9207 issuer a callback_handler forwarded, if the SDK carries it."""
-    return None if isinstance(result, tuple) else getattr(result, "iss", None)
+_SDK_CARRIES_ISS = not isinstance(
+    mcp2cli._authorization_code_result("probe-code", "probe-state"), tuple
+)
+"""v2's ``AuthorizationCodeResult`` carries the RFC 9207 issuer; v1's tuple cannot."""
 
 
 class TestResolveSecret:
@@ -852,6 +853,68 @@ class TestCallbackHandler:
         assert mcp2cli._CallbackHandler.auth_code is None
 
 
+class TestLocalListenerCallbackResult:
+    """The default flow's callback_handler, driven by a real redirect request.
+
+    ``build_oauth_provider`` binds the loopback listener; the handler serves one
+    request and turns it into whatever the installed SDK expects. These tests
+    issue the redirect over HTTP the way a browser would, so the whole path --
+    handler, class state, result construction -- is exercised.
+    """
+
+    @staticmethod
+    def _drive(provider, query):
+        """GET ``query`` against the provider's listener; return its result."""
+        import threading
+        from urllib.parse import urlparse
+        from urllib.request import urlopen
+
+        import anyio
+
+        redirect_uri = str(provider.context.client_metadata.redirect_uris[0])
+        port = urlparse(redirect_uri).port
+        # The socket is already listening (HTTPServer binds in its
+        # constructor), so this request queues until handle_request accepts it.
+        redirect = threading.Thread(
+            target=lambda: urlopen(
+                f"http://127.0.0.1:{port}/callback?{query}", timeout=5
+            ).read(),
+            daemon=True,
+        )
+        redirect.start()
+        try:
+            return anyio.run(provider.context.callback_handler)
+        finally:
+            redirect.join(timeout=5)
+
+    def test_redirect_with_iss_is_forwarded(self, tmp_path, monkeypatch):
+        """RFC 9207: an issuer that reaches the listener must reach the SDK, or
+        the flow dies with 'Authorization response missing iss parameter'."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
+
+        result = self._drive(
+            provider,
+            "code=live-code&state=live-state&iss=https%3A%2F%2Fissuer.example.com",
+        )
+
+        assert _code_state(result) == ("live-code", "live-state")
+        if _SDK_CARRIES_ISS:
+            assert result.iss == "https://issuer.example.com"
+
+    def test_redirect_without_iss_stays_absent(self, tmp_path, monkeypatch):
+        """Servers that omit iss must not be handed an empty one: the SDK only
+        rejects a missing issuer when the metadata advertised it."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
+
+        result = self._drive(provider, "code=plain-code&state=plain-state")
+
+        assert _code_state(result) == ("plain-code", "plain-state")
+        if _SDK_CARRIES_ISS:
+            assert result.iss is None
+
+
 class TestCachedRedirectUriReuse:
     """Tests for issue #54 fix: reuse cached redirect_uri when port is free."""
 
@@ -1045,6 +1108,14 @@ class TestParseOAuthCallbackInput:
         )
         assert (code, state, iss) == ("a", "b", "https://clerk.example.com")
 
+    def test_empty_iss_is_reported_as_absent(self):
+        """An empty ``iss=`` must reach the SDK as ``None``: absent is accepted
+        unless the server advertised the parameter, whereas ``""`` would be
+        rejected as an issuer mismatch."""
+        assert mcp2cli._parse_oauth_callback_input(
+            "http://127.0.0.1:1/callback?code=a&state=b&iss="
+        ) == ("a", "b", None)
+
     def test_error_redirect_raises_with_description(self):
         with pytest.raises(RuntimeError, match=r"access_denied \(user said no\)"):
             mcp2cli._parse_oauth_callback_input(
@@ -1175,8 +1246,8 @@ class TestManualCallbackProvider:
         result = anyio.run(provider.context.callback_handler)
 
         assert _code_state(result) == ("zz", "yy")
-        if not isinstance(result, tuple):
-            assert _result_iss(result) == "https://issuer.example.com"
+        if _SDK_CARRIES_ISS:
+            assert result.iss == "https://issuer.example.com"
 
     def test_manual_redirect_handler_prints_url_and_skips_browser(
         self, tmp_path, monkeypatch, capsys
