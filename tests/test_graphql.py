@@ -489,12 +489,40 @@ class TestGraphQLNameCollisions:
             "create-user",
         ]
 
-    def test_field_metadata_survives_renaming(self):
+    def test_numbered_alias_never_shadows_a_natural_name(self):
         schema = _name_collision_schema(
-            query_fields=["getUser", "get_user"]
+            query_fields=["getUser", "get_user", "queryGetUser", "query_get_user_2"]
         )
         cmds = mcp2cli.extract_graphql_commands(schema)
-        # The wire name is what actually goes into the document, so it must
-        # be preserved even when the CLI name is aliased.
-        assert [c.graphql_field_name for c in cmds] == ["getUser", "get_user"]
-        assert all(c.graphql_operation_type == "query" for c in cmds)
+        by_field = {c.graphql_field_name: c.name for c in cmds}
+        assert by_field["queryGetUser"] == "query-get-user"
+        assert by_field["query_get_user_2"] == "query-get-user-2"
+        assert by_field["get_user"] == "query-get-user-3"
+        assert len(set(by_field.values())) == 4
+
+    def test_aliased_command_still_queries_its_original_field(self):
+        # The CLI rename must not leak into the wire request: the aliased
+        # command has to select the field it was generated from.
+        schema = _name_collision_schema(query_fields=["getUser", "get_user"])
+        aliased = mcp2cli.extract_graphql_commands(schema)[1]
+        assert aliased.name == "query-get-user"
+
+        document, variables, field_name = mcp2cli._build_graphql_document(
+            aliased, argparse.Namespace(), schema
+        )
+        assert field_name == "get_user"
+        assert document.startswith("query {")
+        assert "get_user" in document
+        assert "query-get-user" not in document
+        assert variables == {}
+
+    def test_aliased_mutation_still_sends_a_mutation(self):
+        schema = _name_collision_schema(mutation_fields=["getUser", "get_user"])
+        aliased = mcp2cli.extract_graphql_commands(schema)[1]
+        assert aliased.name == "mutation-get-user"
+
+        document, _, field_name = mcp2cli._build_graphql_document(
+            aliased, argparse.Namespace(), schema
+        )
+        assert field_name == "get_user"
+        assert document.startswith("mutation {")
