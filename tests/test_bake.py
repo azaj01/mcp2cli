@@ -247,14 +247,21 @@ class TestBakedToArgv:
 # ---------------------------------------------------------------------------
 
 
-def _run(*args, config_dir=None, cache_dir=None):
+def _run(*args, config_dir=None, cache_dir=None, cwd=None):
     env = os.environ.copy()
     if config_dir:
         env["MCP2CLI_CONFIG_DIR"] = str(config_dir)
     if cache_dir:
         env["MCP2CLI_CACHE_DIR"] = str(cache_dir)
     cmd = [sys.executable, "-m", "mcp2cli", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+        cwd=str(cwd) if cwd else None,
+    )
 
 
 class TestBakeCreateAndUse:
@@ -634,7 +641,64 @@ class TestBakeRemoveWrapperSafety:
         assert not (custom / "mytool").exists()
         assert decoy.exists()
 
-    def test_install_records_the_wrapper_path(self, monkeypatch, tmp_path):
+    def test_relative_dir_wrapper_is_removed_from_a_different_cwd(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        project = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        (project / "scripts").mkdir(parents=True)
+        (elsewhere / "scripts").mkdir(parents=True)
+
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        monkeypatch.chdir(project)
+        m._bake_install(["mytool", "--dir", "./scripts"])
+        installed = project / "scripts" / "mytool"
+        assert installed.exists()
+
+        # A byte-identical wrapper of the same name sits at the same *relative*
+        # path below the directory `bake remove` runs from; only the recorded
+        # absolute destination tells the two apart.
+        decoy = elsewhere / "scripts" / "mytool"
+        decoy.write_text(installed.read_text())
+
+        monkeypatch.chdir(elsewhere)
+        m._bake_remove(["mytool"])
+
+        assert not installed.exists()
+        assert decoy.exists()
+
+    def test_wrapper_in_a_symlinked_dir_is_removed_without_touching_neighbours(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        real = tmp_path / "real_bin"
+        real.mkdir()
+        neighbour = real / "othertool"
+        neighbour.write_text("#!/bin/sh\n# the user's own othertool\n")
+        link = tmp_path / "link_bin"
+        link.symlink_to(real)
+
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_install(["mytool", "--dir", str(link)])
+        assert (real / "mytool").exists()
+
+        m._bake_remove(["mytool"])
+
+        assert not (real / "mytool").exists()
+        assert neighbour.exists()
+
+    def test_symlink_squatting_the_recorded_path_is_not_followed(
+        self, monkeypatch, tmp_path
+    ):
         home = tmp_path / "home"
         (home / ".local" / "bin").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
@@ -643,7 +707,43 @@ class TestBakeRemoveWrapperSafety:
         custom = tmp_path / "scripts"
         m = self._baked(monkeypatch, tmp_path, "mytool")
         m._bake_install(["mytool", "--dir", str(custom)])
-        assert m._load_baked("mytool")["wrapper_path"] == str(custom / "mytool")
+        wrapper = custom / "mytool"
+
+        # Something replaced our file with a link to an unrelated wrapper.
+        target = tmp_path / "other-wrapper"
+        target.write_text(
+            f"#!/bin/sh\n{m._WRAPPER_MARKER}\nexec mcp2cli @othertool \"$@\"\n"
+        )
+        wrapper.unlink()
+        wrapper.symlink_to(target)
+
+        m._bake_remove(["mytool"])
+
+        assert target.exists()
+
+    def test_legacy_relative_recorded_path_is_left_alone(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        import mcp2cli
+
+        project = tmp_path / "project"
+        (project / "scripts").mkdir(parents=True)
+        bystander = project / "scripts" / "mytool"
+        bystander.write_text(f"#!/bin/sh\n{mcp2cli._WRAPPER_MARKER}\n")
+
+        # An older version stored --dir verbatim; the directory it was relative
+        # to is unknowable, so nothing below the current one may be deleted.
+        m = self._baked(
+            monkeypatch, tmp_path, "mytool", extra={"wrapper_path": "scripts/mytool"}
+        )
+        monkeypatch.chdir(project)
+        m._bake_remove(["mytool"])
+
+        assert bystander.exists()
+        assert m._load_baked("mytool") is None
 
     def test_remove_succeeds_when_no_wrapper_was_installed(
         self, monkeypatch, tmp_path
@@ -656,3 +756,41 @@ class TestBakeRemoveWrapperSafety:
         m = self._baked(monkeypatch, tmp_path, "mytool")
         m._bake_remove(["mytool"])
         assert m._load_baked("mytool") is None
+
+
+class TestBakeRemoveAcrossWorkingDirectories:
+    """End-to-end: `--dir ./scripts` in one directory, `remove` from another."""
+
+    def test_relative_install_dir_survives_a_change_of_directory(self, tmp_path):
+        cfg_dir = tmp_path / "config"
+        cache_dir = tmp_path / "cache"
+        project = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        project.mkdir()
+        (elsewhere / "scripts").mkdir(parents=True)
+
+        r = _run(
+            "bake", "create", "reltool",
+            "--mcp-stdio", f"{sys.executable} {MCP_SERVER}",
+            config_dir=cfg_dir, cache_dir=cache_dir,
+        )
+        assert r.returncode == 0, r.stderr
+
+        r = _run(
+            "bake", "install", "reltool", "--dir", "./scripts",
+            config_dir=cfg_dir, cache_dir=cache_dir, cwd=project,
+        )
+        assert r.returncode == 0, r.stderr
+        installed = project / "scripts" / "reltool"
+        assert installed.exists()
+
+        decoy = elsewhere / "scripts" / "reltool"
+        decoy.write_text(installed.read_text())
+
+        r = _run(
+            "bake", "remove", "reltool",
+            config_dir=cfg_dir, cache_dir=cache_dir, cwd=elsewhere,
+        )
+        assert r.returncode == 0, r.stderr
+        assert not installed.exists(), "the wrapper we installed was not removed"
+        assert decoy.exists(), "a same-named file below the new cwd was deleted"
