@@ -2855,9 +2855,23 @@ def _exc_message(exc: BaseException) -> str:
     return "; ".join(part for part in parts if part) or exc.__class__.__name__
 
 
+def _mcp_connection_closed() -> tuple[type[BaseException], int] | None:
+    """Return the SDK's MCP error class plus its ``CONNECTION_CLOSED`` code."""
+    try:
+        try:  # MCP SDK v2
+            from mcp.shared.exceptions import MCPError
+            from mcp_types import CONNECTION_CLOSED
+        except ImportError:  # MCP SDK v1
+            from mcp.shared.exceptions import McpError as MCPError
+            from mcp.types import CONNECTION_CLOSED
+    except ImportError:  # pragma: no cover - SDK too old or absent
+        return None
+    return MCPError, CONNECTION_CLOSED
+
+
 def _is_disconnect(exc: BaseException) -> bool:
     """Report whether a leaf exception means the server dropped the connection."""
-    return isinstance(
+    if isinstance(
         exc,
         (
             BrokenPipeError,
@@ -2867,7 +2881,15 @@ def _is_disconnect(exc: BaseException) -> bool:
             anyio.BrokenResourceError,
             anyio.ClosedResourceError,
         ),
-    )
+    ):
+        return True
+    resolved = _mcp_connection_closed()
+    if resolved is None:
+        return False
+    error_type, connection_closed = resolved
+    if not isinstance(exc, error_type):
+        return False
+    return getattr(getattr(exc, "error", None), "code", None) == connection_closed
 
 
 def _run_mcp_clean(fn, source: str):
