@@ -2883,6 +2883,21 @@ def _exc_message(exc: BaseException) -> str:
     return "; ".join(part for part in parts if part) or exc.__class__.__name__
 
 
+def _is_disconnect(exc: BaseException) -> bool:
+    """Report whether a leaf exception means the server dropped the connection."""
+    return isinstance(
+        exc,
+        (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            anyio.EndOfStream,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+        ),
+    )
+
+
 def _run_mcp_clean(fn, source: str):
     """Run an MCP coroutine, reporting failures as one clean error line.
 
@@ -2908,6 +2923,11 @@ def _run_mcp_clean(fn, source: str):
             hint = (
                 " — the server rejected the request; pass credentials with "
                 "--auth-header 'Name:Value' or use the --oauth-* options"
+            )
+        elif any(_is_disconnect(leaf) for leaf in leaves):
+            hint = (
+                " — the server disconnected unexpectedly; it may have crashed "
+                "or exited. Check the server command and its logs"
             )
         else:
             hint = ""
