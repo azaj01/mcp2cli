@@ -2542,6 +2542,64 @@ def _bake_show(argv: list[str]) -> None:
     print(json.dumps(display, indent=2, ensure_ascii=False))
 
 
+_WRAPPER_MARKER = "# installed by mcp2cli bake install"
+
+
+def _wrapper_is_ours(path: Path) -> bool:
+    """True only for a wrapper script mcp2cli itself wrote.
+
+    A symlink is never ours: `bake install` writes a regular file, and reading
+    the marker through a link would answer for the link's target rather than
+    for the path we are about to unlink.
+    """
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        return _WRAPPER_MARKER in path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _remove_installed_wrapper(name: str, cfg: dict) -> None:
+    """Delete the wrapper for *name*, but only if mcp2cli installed it.
+
+    `bake install` records its destination as an absolute path, so a wrapper
+    placed by --dir is found again from any working directory. Anything we
+    cannot positively identify as ours is left alone and reported: deleting an
+    unrelated executable that merely shares the baked tool's name is far worse
+    than leaving a stale wrapper behind.
+    """
+    recorded = cfg.get("wrapper_path")
+    if recorded:
+        wrapper = Path(recorded)
+        if not wrapper.is_absolute():
+            # Recorded by a version that stored --dir verbatim: interpreting it
+            # against the current directory would point at a different file.
+            print(
+                f"Note: left the wrapper for '{name}' in place -- its recorded "
+                f"location {recorded!r} is relative to an unknown directory.",
+                file=sys.stderr,
+            )
+            return
+    else:
+        wrapper = Path.home() / ".local" / "bin" / name
+    if not wrapper.exists() and not wrapper.is_symlink():
+        return
+    if not _wrapper_is_ours(wrapper):
+        print(
+            f"Note: left {wrapper} in place -- it was not installed by "
+            f"mcp2cli bake install.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        wrapper.unlink()
+    except OSError as exc:
+        print(f"Warning: could not remove {wrapper}: {exc}", file=sys.stderr)
+        return
+    print(f"Removed installed wrapper: {wrapper}")
+
+
 def _bake_remove(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="mcp2cli bake remove")
     p.add_argument("name")
@@ -2550,13 +2608,10 @@ def _bake_remove(argv: list[str]) -> None:
     if args.name not in all_configs:
         print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
         sys.exit(1)
+    cfg = all_configs[args.name]
     del all_configs[args.name]
     _save_baked_all(all_configs)
-    # Clean up any installed wrapper
-    wrapper = Path.home() / ".local" / "bin" / args.name
-    if wrapper.exists():
-        wrapper.unlink()
-        print(f"Removed installed wrapper: {wrapper}")
+    _remove_installed_wrapper(args.name, cfg)
     print(f"Baked tool '{args.name}' removed.")
 
 
@@ -2603,18 +2658,32 @@ def _bake_install(argv: list[str]) -> None:
     if cfg is None:
         print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
         sys.exit(1)
-    bin_dir = Path(args.dir) if args.dir else Path.home() / ".local" / "bin"
+    bin_dir = Path(args.dir).expanduser() if args.dir else Path.home() / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    # Anchor the destination absolutely: a relative --dir like ./scripts means
+    # nothing to a later `bake remove` run from a different directory. Only the
+    # directory is resolved -- keeping the final component as-is means a
+    # symlink named after the tool is unlinked itself rather than removal
+    # following it into whatever unrelated file it points at.
+    bin_dir = bin_dir.resolve()
     wrapper = bin_dir / args.name
     # Resolve mcp2cli path
     mcp2cli_bin = shutil.which("mcp2cli") or "mcp2cli"
     wrapper.write_text(
-        f"#!/bin/sh\nexec {shlex.quote(mcp2cli_bin)} @{args.name} \"$@\"\n"
+        f"#!/bin/sh\n{_WRAPPER_MARKER}\n"
+        f"exec {shlex.quote(mcp2cli_bin)} @{args.name} \"$@\"\n"
     )
     wrapper.chmod(0o755)
+    # Remember where it landed so `bake remove` can find it again, including
+    # when --dir put it somewhere other than ~/.local/bin.
+    all_configs = _load_baked_all()
+    if args.name in all_configs:
+        all_configs[args.name]["wrapper_path"] = str(wrapper)
+        _save_baked_all(all_configs)
     print(f"Installed wrapper: {wrapper}")
-    if args.dir is None and str(bin_dir) not in os.environ.get("PATH", ""):
-        print(f"  Note: {bin_dir} may not be in your PATH")
+    default_dir = Path.home() / ".local" / "bin"
+    if args.dir is None and str(default_dir) not in os.environ.get("PATH", ""):
+        print(f"  Note: {default_dir} may not be in your PATH")
 
 
 # ---------------------------------------------------------------------------
