@@ -263,6 +263,8 @@ mcp2cli bake create myfs --mcp-stdio "npx -y @modelcontextprotocol/server-filesy
 # Use with @ prefix
 mcp2cli @petstore --list
 mcp2cli @petstore list-pets --limit 10
+mcp2cli @myfs --list                      # search-files, list-directory, list-directory-with-sizes
+mcp2cli @myfs search-files --path /tmp --pattern "**/*.md"   # pattern is a glob, relative to --path
 
 # Manage
 mcp2cli bake list
