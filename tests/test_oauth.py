@@ -46,10 +46,21 @@ def _code_state(result):
     return (result.code, result.state)
 
 
-_SDK_CARRIES_ISS = not isinstance(
-    mcp2cli._authorization_code_result("probe-code", "probe-state"), tuple
-)
-"""v2's ``AuthorizationCodeResult`` carries the RFC 9207 issuer; v1's tuple cannot."""
+def _sdk_carries_iss():
+    """Whether the installed SDK's callback contract can carry an issuer.
+
+    Asked of the SDK directly, never of ``_authorization_code_result``: if that
+    helper regressed to a tuple (or dropped ``iss``) under v2, the issuer
+    assertions must fail, not quietly switch themselves off.
+    """
+    try:
+        from mcp.shared.auth import AuthorizationCodeResult
+    except ImportError:  # v1 hands back a plain (code, state) tuple
+        return False
+    return "iss" in AuthorizationCodeResult.model_fields
+
+
+_SDK_CARRIES_ISS = _sdk_carries_iss()
 
 
 class TestResolveSecret:
