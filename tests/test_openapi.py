@@ -561,3 +561,25 @@ class TestCommandNameCollisions:
             "list-things",
             "create-thing",
         ]
+
+    def test_distinct_operation_ids_that_kebab_alike_stay_addressable(self):
+        # A perfectly valid spec: four different operationIds that all
+        # normalize to the same CLI name. Every operation must keep its own
+        # command, and that command must carry its own path and method.
+        spec = _collision_spec(
+            ("/pets", "get", "listPets"),
+            ("/pets", "post", "list-pets"),
+            ("/pets/all", "get", "list_pets"),
+            ("/pets/legacy", "get", "ListPets"),
+        )
+        cmds = extract_openapi_commands(spec)
+        wire = {c.name: (c.method, c.path) for c in cmds}
+        assert wire == {
+            "list-pets": ("get", "/pets"),
+            "list-pets-post": ("post", "/pets"),
+            "list-pets-get": ("get", "/pets/all"),
+            "list-pets-get-2": ("get", "/pets/legacy"),
+        }
+        parser = build_argparse(cmds, argparse.ArgumentParser(add_help=False))
+        for cmd in cmds:
+            assert parser.parse_args([cmd.name])._cmd is cmd
