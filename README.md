@@ -213,13 +213,14 @@ mcp2cli bake create petstore --spec https://api.example.com/spec.json \
   --exclude "delete-*,update-*" --methods GET,POST --cache-ttl 7200
 
 # Create a baked tool from an MCP stdio server
-mcp2cli bake create mygit --mcp-stdio "npx @mcp/github" \
-  --include "search-*,list-*" --exclude "delete-*"
+mcp2cli bake create myfs --mcp-stdio "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+  --include "search-*,list-*" --exclude "list-allowed-*"
 
 # Use a baked tool with @ prefix — no connection flags needed
 mcp2cli @petstore --list
 mcp2cli @petstore list-pets --limit 10
-mcp2cli @mygit search-repos --query "rust"
+mcp2cli @myfs --list                      # search-files, list-directory, list-directory-with-sizes
+mcp2cli @myfs search-files --path /tmp --pattern "**/*.md"   # pattern is a glob, relative to --path
 
 # Manage baked tools
 mcp2cli bake list                         # show all baked tools
@@ -236,6 +237,8 @@ Filtering options:
 - `--methods` — comma-separated HTTP methods to allow (e.g. `"GET,POST"`, OpenAPI only)
 
 Configs are stored in `~/.config/mcp2cli/baked.json`. Override with `MCP2CLI_CONFIG_DIR`.
+
+`bake show` masks the credential values it knows about — the OAuth client secret and every `--auth-header` value — while leaving `env:`/`file:` references readable so the config stays diagnosable. Values baked in with `--env` are printed as stored, so scrub those before pasting the output if an env var carries a token.
 
 ### Usage-aware tool ranking
 
